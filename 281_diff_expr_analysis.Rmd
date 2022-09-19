@@ -1,0 +1,217 @@
+---
+title: "Differential_expression_analysis"
+author: "Xinyun Stacy Li"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Install and load packages as needed
+```{r}
+#if (!require("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install(version = "3.14")
+#BiocManager::install("edgeR")
+library(edgeR)
+library(matrixStats)
+```
+
+## Import expression matrix generated from part1 by Qiuyue 
+```{r}
+#expr_table<-read.table('count.geneid.txt', header = TRUE)
+expr_table<-read.table('counts.txt',header=TRUE)
+head(expr_table)
+```
+
+## Store the expression table in a DGEList called d for edgeR to process
+```{r}
+rownames(expr_table) <- expr_table$Geneid #make the index to be gene id
+Geneid<-expr_table$Geneid #store Geneid before remove it
+expr_table = subset(expr_table, select = -Geneid )# remove Geneid column from expr_table
+DataGroups <- c("pdx1", "con", "pdx1", "con", "con", "pdx1","pbs","pbs","pbs")
+d <- DGEList(counts=expr_table,group=factor(DataGroups))
+head(d)
+dim(d)
+```
+
+```{r}
+d.full <- d # keep the old one in case we mess up
+
+#To get an idea of what the expression data look like
+apply(d$counts, 2, sum) # total gene counts per sample
+head(cpm(d))#calculate counts per million
+```
+## Filter out unexpressed and lowly expressed genes using CPM
+```{r}
+#Keep genes with a cpm higher than 0.5 (corresponding to a count of 10)
+#and being expressed in 3 or more samples since we have 3 samples for each group
+keep <- rowSums(cpm(d)>0.5) >= 3 
+d_filtered <- d[keep,]
+dim(d_filtered)
+```
+## Reset library sizes after filtering
+```{r}
+d_filtered$samples$lib.size <- colSums(d_filtered$counts)
+d_filtered$samples
+```
+## Normalization
+```{r}
+d_norm <- calcNormFactors(d_filtered)
+head(d_norm)
+```
+
+## Visualize the data using MDS plot
+```{r}
+#The closer the groups, the similar their gene expressions are
+plotMDS(d_norm, method="logFC", col=as.numeric(d_norm$samples$group))
+#legend("bottomleft", as.character(unique(d_norm$samples$group)),col=1:3, pch=20)
+```
+## Estimate dispersion
+### First assume every gene has the same common dispersion
+```{r}
+d1 <- estimateCommonDisp(d_norm, verbose=T)
+d1 <- estimateTagwiseDisp(d1)
+plotBCV(d1)
+```
+
+### Notice that the tagwise dispersion doesn't follow the common dispersion line perfectly, thus we estimate the trended dispersion here
+```{r}
+design.mat <- model.matrix(~ 0 + d_norm$samples$group)
+colnames(design.mat) <- levels(d_norm$samples$group)
+d2 <- estimateGLMCommonDisp(d_norm,design.mat) #fit a common dispersion using GLM model first
+d2 <- estimateGLMTrendedDisp(d2,design.mat)#fit a trended dispersion model 
+# The default method is "auto" which chooses "bin.spline" when > 200 genes and "power" otherwise.
+d2 <- estimateGLMTagwiseDisp(d2,design.mat)#fit tagwise dispersion
+plotBCV(d2)
+```
+
+## Look for differentially expressed genes
+
+### First do the test with common dispersion
+```{r}
+et12 <- exactTest(d1,pair=c(2,1)) #compare groups 1 and 2
+et31 <- exactTest(d1, pair=c(1,3)) # compare groups 1 and 3
+et32 <- exactTest(d1, pair=c(2,3)) #compare groups 2 and 3
+#first 10 genes with most significant p-values (most differentially expressed)
+topTags(et12, n=10) 
+topTags(et31, n=10)
+topTags(et32, n=10)
+```
+### The number of differentially expressed (both down- and up-regulated) genes between group 1 and 2 with common dispersion
+```{r}
+#FDR<0.05
+de12_common <- decideTestsDGE(et12, adjust.method="BH", p.value=0.05)
+summary(de12_common)
+```
+```{r}
+# MA plot showing tagwise log-fold-changes against log-cpm
+de_common_tags12 <- rownames(d1)[as.logical(de12_common)] 
+plotSmear(et12, de.tags=de_common_tags12)
+abline(h = c(-1, 1), col = "blue") #up- or down-regulated two fold
+```
+
+### The number of differentially expressed (both down- and up-regulated) genes between group 2 and 3 with common dispersion
+```{r}
+#FDR<0.05
+de32_common <- decideTestsDGE(et32, adjust.method="BH", p.value=0.05)
+summary(de32_common)
+```
+```{r}
+# MA plot showing tagwise log-fold-changes against log-cpm
+de_common_tags32 <- rownames(d1)[as.logical(de32_common)] 
+plotSmear(et32, de.tags=de_common_tags32)
+abline(h = c(-1, 1), col = "blue") #up- or down-regulated two fold
+```
+
+### The number of differentially expressed (both down- and up-regulated) genes between group 1 and 3 with common dispersion
+```{r}
+#FDR<0.05
+de31_common <- decideTestsDGE(et31, adjust.method="BH", p.value=0.05)
+summary(de31_common)
+```
+```{r}
+# MA plot showing tagwise log-fold-changes against log-cpm
+de_common_tags31 <- rownames(d1)[as.logical(de31_common)] 
+plotSmear(et31, de.tags=de_common_tags31)
+abline(h = c(-1, 1), col = "blue") #up- or down-regulated two fold
+```
+
+### Conduct differential expression test with trended dispersion
+```{r}
+design.mat
+```
+```{r}
+fit <- glmFit(d2, design.mat)
+# compare (group 1 - group 2) to 0:
+# this is equivalent to comparing group 1 to group 2
+lrt12 <- glmLRT(fit, contrast=c(1,-1,0))
+lrt31 <- glmLRT(fit, contrast=c(-1,0,1))
+lrt32 <- glmLRT(fit, contrast=c(0,-1,1))
+con_pbs<-topTags(lrt12, n=15)
+pdx1_con<-topTags(lrt31,n=15)
+pdx1_pbs<-topTags(lrt32, n=15)
+```
+
+```{r}
+con_pbs
+pdx1_con
+pdx1_pbs
+```
+
+### The number of differentially expressed (both down- and up-regulated) genes between group 1 and 2 with trended dispersion
+```{r}
+de12_trend <- decideTestsDGE(lrt12, adjust.method="BH", p.value=0.05)
+summary(de12_trend)
+
+# MA plot
+de_trend_tags12 <- rownames(d1)[as.logical(de12_trend)] 
+plotSmear(lrt12, de.tags=de_trend_tags12)
+abline(h = c(-1, 1), col = "blue") #up- or down-regulated two fold
+```
+
+### The number of differentially expressed (both down- and up-regulated) genes between group 2 and 3 with trended dispersion
+```{r}
+de32_trend <- decideTestsDGE(lrt32, adjust.method="BH", p.value=0.05)
+summary(de32_trend)
+
+# MA plot
+de_trend_tags32 <- rownames(d1)[as.logical(de32_trend)] 
+plotSmear(lrt32, de.tags=de_trend_tags32)
+abline(h = c(-1, 1), col = "blue") #up- or down-regulated two fold
+```
+
+### The number of differentially expressed (both down- and up-regulated) genes between group 1 and 3 with trended dispersion
+```{r}
+de13_trend <- decideTestsDGE(lrt31, adjust.method="BH", p.value=0.05)
+summary(de13_trend)
+
+# MA plot
+de_trend_tags13 <- rownames(d1)[as.logical(de13_trend)] 
+plotSmear(lrt31, de.tags=de_trend_tags13)
+abline(h = c(-1, 1), col = "blue")
+```
+
+### Merge plots
+```{r}
+attach(mtcars)
+layout(matrix(c(1,1,1, 2,2,2,3,3,4,4,5,5), 2, 6, byrow = TRUE))
+plotMDS(d_norm, method="logFC", col=as.numeric(d_norm$samples$group))
+plotBCV(d2)
+plotSmear(lrt12, de.tags=de_trend_tags12)
+abline(h = c(-1, 1), col = "blue")
+plotSmear(lrt32, de.tags=de_trend_tags32)
+abline(h = c(-1, 1), col = "blue")
+plotSmear(lrt31, de.tags=de_trend_tags13)
+abline(h = c(-1, 1), col = "blue")
+
+```
+
+
+```{r}
+#write.csv(con_pbs$table,"diff_expr_genes_con&pbs.csv")
+#write.csv(pdx1_pbs$table,"diff_expr_genes_pdx1&pbs.csv")
+#write.csv(pdx1_con$table,"diff_expr_genes_pdx1&con.csv")
+```
+
